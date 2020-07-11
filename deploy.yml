@@ -1,0 +1,2447 @@
+trigger: none
+
+#  Set vmImage from Pool of hosted images
+#              https://docs.microsoft.com/en-us/azure/devops/pipelines/agents/hosted?view=azure-devops#use-a-microsoft-hosted-agent
+#pool:
+#  vmImage: 'ubuntu-latest'
+
+pool:
+  name: 'HIA - Self Hosted'
+#  name: 'Default'
+
+
+# https://docs.microsoft.com/en-us/azure/devops/pipelines/library/variable-groups
+# https://docs.microsoft.com/en-us/azure/devops/pipelines/process/variables
+# https://docs.microsoft.com/en-us/azure/devops/pipelines/build/variables
+variables:
+- group: hia_global_variables
+# includes variables:
+#   aws_ingress_stack_name, aws_ingress_template_file, aws_landing_stack_name, aws_landing_template_file,
+#   aws_db_stack_name, aws_db_template_file, aws_region_name, aws_staging_stack_name, aws_staging_template_file,
+#   aws_iz_creation_template_file, iz_name_a, aws_iz_stack_name_a, iz_name_b, aws_iz_stack_name_b, iz_name_c, aws_iz_stack_name_d,
+#   iz_name_e, aws_iz_stack_name_f, iz_name_g, aws_iz_stack_name_h
+
+# Variables that are set in the Pipeline's Variables Configuration
+#   update at run time
+#     ad_hoc_id (is used with the ad hoc sandbox pipeline)
+#     new_ingress_to_landing_stack (no or yes passed to FirstRun parameter)
+#     aws_db_stack_action (create, update, or none)  This is used as a condition flag for steps related to db and iz stacks.
+#   do NOT update at run time - Keep Locked
+#     aws_credentials, aws_db_name, aws_environment, aws_security_group, aws_subnet_az
+#     spark_job_bookmark_option, spark_job_glue_version, spark_job_max_capacity, spark_job_python_version
+
+# If you use both variables and variable groups,
+# you'll have to use name/value syntax for the
+# individual (non-grouped) variables. See below.
+- name: names_uniquifier
+  value: '$(ad_hoc_id)'
+
+- name: the_real_ad_hoc_id
+  value: $[coalesce(variables.ad_hoc_id, 'NA')]
+
+#Lambdas
+- name: aws_lambda_fn_name_ingress_landing
+  value: 'LambdaIngressLanding$(names_uniquifier)'
+
+- name: aws_lambda_name_segment_update
+  value: 'HCGPipelineSegmentUpdate$(names_uniquifier)'
+
+- name: aws_lambda_fn_name_landing_staging
+  value: 'LambdaLandingStaging$(names_uniquifier)'
+
+- name: aws_lambda_fn_name_staging_quality
+  value: 'LambdaStagingQuality$(names_uniquifier)'
+
+- name: aws_lambda_fn_name_cleansing_ods
+  value: 'LambdaCleansingODS$(names_uniquifier)'
+- name: aws_lambda_fn_name_staging_cleansing
+  value: 'LambdaStagingCleansing$(names_uniquifier)'
+- name: aws_lambda_fn_name_analyze_db
+  value: 'LambdaAnalyzeDb$(names_uniquifier)'
+
+#S3 Buckets
+- name: aws_ingress_bucket_name
+  value: 'hcg-ingress$(names_uniquifier)'
+
+- name: aws_landing_bucket_name
+  value: 'hcg-landing$(names_uniquifier)'
+
+- name: aws_glue_script_bucket_name
+  value: 'hcg-glue-script-$(names_uniquifier)-$(aws_environment)'
+
+- name: aws_staging_bucket_name
+  value: 'hcg-staging$(names_uniquifier)'
+- name: aws_cleansing_bucket_name
+  value: 'hcg-cleansing$(names_uniquifier)'
+
+steps:
+# ===============================================================================================================
+# ===============================================================================================================
+# ===============================================================================================================
+
+##
+## Create/Update aws_db_stack_name stack
+- script: |
+    echo aws_db_stack_action $(aws_db_stack_action)
+    echo Deploying $(aws_db_stack_name)$(names_uniquifier)
+    echo from branch path $(Build.SourceBranch)
+    echo branch named $(Build.SourceBranchName) version $(Build.SourceVersion)
+    echo Summary of Database and Insight Zone Actions
+    echo variables.aws_db_stack_action $(aws_db_stack_action)
+    echo variables.iz_action_a  $(iz_action_a) $(iz_name_a)
+    echo variables.iz_action_b  $(iz_action_b) $(iz_name_b)
+    echo variables.iz_action_c  $(iz_action_c) $(iz_name_c)
+    echo variables.iz_action_d  $(iz_action_d) $(iz_name_d)
+    echo variables.iz_action_e  $(iz_action_e) $(iz_name_e)
+    echo variables.iz_action_f  $(iz_action_f) $(iz_name_f)
+    echo variables.iz_action_g  $(iz_action_g) $(iz_name_g)
+    echo variables.iz_action_h  $(iz_action_h) $(iz_name_h)
+    date
+  displayName: Begin Deployment of Database Stack
+
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: Create Database Stack
+  condition: eq(variables.aws_db_stack_action, 'create')
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_stack_name)$(names_uniquifier)
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_db_template_file)
+    templateParametersSource: 'inline'
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "DBName",
+          "ParameterValue": "$(aws_db_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        },
+        {
+          "ParameterKey": "Schedule",
+          "ParameterValue": "$(Schedule)"
+        }
+      ]
+    outputVariable: 'OUT-VAR-$(aws_db_stack_name)$(names_uniquifier)'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+
+#-------------------------------------------------------------------------------------------
+# START - db & IZ Updates ----------------------------------------------
+#-------------------------------------------------------------------------------------------
+
+# START - db & IZ Updates ----------------------------------------------
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)a
+    echo templateSource: file
+    echo templateFile: $(aws_db_update_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SubnetAZ $(aws_subnet_az)
+    echo SecurityGroup $(aws_security_group)
+    echo DBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo LSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo ILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_a)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: and(ne(variables.aws_db_stack_action, 'create'), in('update', variables.aws_db_stack_action, variables.iz_action_a))
+
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: Update Database Stack (IZa)
+  condition: and(ne(variables.aws_db_stack_action, 'create'), in('update', variables.aws_db_stack_action, variables.iz_action_a))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)a
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_db_update_template_file)
+    templateParametersSource: 'inline'
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "DBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "LSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "SCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_a)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+
+      ]
+    outputVariable: 'OUT-VAR-$(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)a'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+
+# Delete the Temporary Database-Update stack
+- task: CloudFormationDeleteStack@1
+  displayName: CloudFormationDeleteStack db IZa
+  condition: and(ne(variables.aws_db_stack_action, 'create'), eq(variables.iz_action_a, 'update'))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)a
+
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)b
+    echo templateSource: file
+    echo templateFile: $(aws_db_update_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SubnetAZ $(aws_subnet_az)
+    echo SecurityGroup $(aws_security_group)
+    echo DBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo LSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo ILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_b)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: and(ne(variables.aws_db_stack_action, 'create'), eq(variables.iz_action_b, 'update'))
+
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: Update Database Stack IZb
+  condition: and(ne(variables.aws_db_stack_action, 'create'), eq(variables.iz_action_b, 'update'))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)b
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_db_update_template_file)
+    templateParametersSource: 'inline'
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "DBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "LSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "SCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_b)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+
+      ]
+    outputVariable: 'OUT-VAR-$(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)b'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+
+# Delete the Temporary Database-Update stack
+- task: CloudFormationDeleteStack@1
+  displayName: CloudFormationDeleteStack db IZb
+  condition: and(ne(variables.aws_db_stack_action, 'create'), eq(variables.iz_action_b, 'update'))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)b
+
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)c
+    echo templateSource: file
+    echo templateFile: $(aws_db_update_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SubnetAZ $(aws_subnet_az)
+    echo SecurityGroup $(aws_security_group)
+    echo DBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo LSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo ILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_c)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: and(ne(variables.aws_db_stack_action, 'create'), eq(variables.iz_action_c, 'update'))
+
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: Update Database Stack IZc
+  condition: and(ne(variables.aws_db_stack_action, 'create'), eq(variables.iz_action_c, 'update'))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)c
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_db_update_template_file)
+    templateParametersSource: 'inline'
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "DBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "LSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "SCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_c)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+
+      ]
+    outputVariable: 'OUT-VAR-$(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)c'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+
+# Delete the Temporary Database-Update stack
+- task: CloudFormationDeleteStack@1
+  displayName: CloudFormationDeleteStack db IZc
+  condition: and(ne(variables.aws_db_stack_action, 'create'), eq(variables.iz_action_c, 'update'))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)c
+
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)d
+    echo tags: CreatedBy=$(Build.RequestedForEmail)
+    echo templateSource: file
+    echo templateFile: $(aws_db_update_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SubnetAZ $(aws_subnet_az)
+    echo SecurityGroup $(aws_security_group)
+    echo DBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo LSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo ILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_d)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: and(ne(variables.aws_db_stack_action, 'create'), eq(variables.iz_action_d, 'update'))
+
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: Update Database Stack IZd
+  condition: and(ne(variables.aws_db_stack_action, 'create'), eq(variables.iz_action_d, 'update'))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)d
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_db_update_template_file)
+    templateParametersSource: 'inline'
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "DBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "LSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "SCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_d)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+
+      ]
+    outputVariable: 'OUT-VAR-$(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)d'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+
+# Delete the Temporary Database-Update stack
+- task: CloudFormationDeleteStack@1
+  displayName: CloudFormationDeleteStack db IZd
+  condition: and(ne(variables.aws_db_stack_action, 'create'), eq(variables.iz_action_d, 'update'))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)d
+
+
+# Start of db & IZ Updates for Insight Zone e ----------------------------------------------
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)e
+    echo templateSource: file
+    echo templateFile: $(aws_db_update_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SubnetAZ $(aws_subnet_az)
+    echo SecurityGroup $(aws_security_group)
+    echo DBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo LSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo ILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_e)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: and(ne(variables.aws_db_stack_action, 'create'), in('update', variables.aws_db_stack_action, variables.iz_action_e))
+
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: Update Database Stack (IZe)
+  condition: and(ne(variables.aws_db_stack_action, 'create'), in('update', variables.aws_db_stack_action, variables.iz_action_e))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)e
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_db_update_template_file)
+    templateParametersSource: 'inline'
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "DBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "LSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "SCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_e)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+
+      ]
+    outputVariable: 'OUT-VAR-$(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)e'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+
+# Delete the Temporary Database-Update stack
+- task: CloudFormationDeleteStack@1
+  displayName: CloudFormationDeleteStack db IZe
+  condition: and(ne(variables.aws_db_stack_action, 'create'), eq(variables.iz_action_e, 'update'))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)e
+
+# Start of db & IZ Updates for Insight Zone f ----------------------------------------------
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)f
+    echo templateSource: file
+    echo templateFile: $(aws_db_update_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SubnetAZ $(aws_subnet_az)
+    echo SecurityGroup $(aws_security_group)
+    echo DBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo LSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo ILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_f)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: and(ne(variables.aws_db_stack_action, 'create'), in('update', variables.aws_db_stack_action, variables.iz_action_f))
+
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: Update Database Stack (IZf)
+  condition: and(ne(variables.aws_db_stack_action, 'create'), in('update', variables.aws_db_stack_action, variables.iz_action_f))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)f
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_db_update_template_file)
+    templateParametersSource: 'inline'
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "DBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "LSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "SCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_f)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+
+      ]
+    outputVariable: 'OUT-VAR-$(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)f'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+
+# Delete the Temporary Database-Update stack
+- task: CloudFormationDeleteStack@1
+  displayName: CloudFormationDeleteStack db IZf
+  condition: and(ne(variables.aws_db_stack_action, 'create'), eq(variables.iz_action_f, 'update'))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)f
+
+# Start of db & IZ Updates for Insight Zone g ----------------------------------------------
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)g
+    echo templateSource: file
+    echo templateFile: $(aws_db_update_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SubnetAZ $(aws_subnet_az)
+    echo SecurityGroup $(aws_security_group)
+    echo DBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo LSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo ILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_g)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: and(ne(variables.aws_db_stack_action, 'create'), in('update', variables.aws_db_stack_action, variables.iz_action_g))
+
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: Update Database Stack (IZg)
+  condition: and(ne(variables.aws_db_stack_action, 'create'), in('update', variables.aws_db_stack_action, variables.iz_action_g))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)g
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_db_update_template_file)
+    templateParametersSource: 'inline'
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "DBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "LSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "SCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_g)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+
+      ]
+    outputVariable: 'OUT-VAR-$(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)g'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+
+# Delete the Temporary Database-Update stack
+- task: CloudFormationDeleteStack@1
+  displayName: CloudFormationDeleteStack db IZg
+  condition: and(ne(variables.aws_db_stack_action, 'create'), eq(variables.iz_action_g, 'update'))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)g
+
+
+# Start of db & IZ Updates for Insight Zone h ----------------------------------------------
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)h
+    echo templateSource: file
+    echo templateFile: $(aws_db_update_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SubnetAZ $(aws_subnet_az)
+    echo SecurityGroup $(aws_security_group)
+    echo DBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo LSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo ILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_h)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: and(ne(variables.aws_db_stack_action, 'create'), in('update', variables.aws_db_stack_action, variables.iz_action_h))
+
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: Update Database Stack (IZh)
+  condition: and(ne(variables.aws_db_stack_action, 'create'), in('update', variables.aws_db_stack_action, variables.iz_action_h))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)h
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_db_update_template_file)
+    templateParametersSource: 'inline'
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "DBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "LSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "SCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_h)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+
+      ]
+    outputVariable: 'OUT-VAR-$(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)h'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+
+# Delete the Temporary Database-Update stack
+- task: CloudFormationDeleteStack@1
+  displayName: CloudFormationDeleteStack db IZh
+  condition: and(ne(variables.aws_db_stack_action, 'create'), eq(variables.iz_action_h, 'update'))
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_db_update_stack_name)$(Build.BuildId)$(names_uniquifier)h
+
+#-------------------------------------------------------------------------------------------
+# END - db & IZ Updates ----------------------------------------------
+#-------------------------------------------------------------------------------------------
+
+- script: |
+    echo $(aws_db_stack_name)$(names_uniquifier)
+  displayName: End Deployment of Database Stack
+
+# ===============================================================================================================
+# ===============================================================================================================
+# ===============================================================================================================
+
+- script: |
+    echo Deploying $(aws_ingress_stack_name)$(names_uniquifier)
+    echo FirstRun and new_ingress_to_landing_stack set to $(new_ingress_to_landing_stack).
+    echo from branch path $(Build.SourceBranch)
+    echo branch named $(Build.SourceBranchName) version $(Build.SourceVersion)
+  displayName: Begin Deployment of Ingress To Landing Stack
+
+#
+# Create/Update ingress-to-landing stack
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: CloudFormationCreateOrUpdateStack Ingress To Landing Stack
+  condition: succeededOrFailed()
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_ingress_stack_name)$(names_uniquifier)
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_ingress_template_File)
+    templateParametersSource: 'inline'
+    # re: LambdaFnNameIngressLanding & LambdaFnNameSegmentUpdate
+    # Lambda FunctionName Length Limit is 64 Characters
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+    #
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "LambdaFnNameIngressLanding",
+          "ParameterValue": "$(aws_lambda_fn_name_ingress_landing)"
+        },
+        {
+          "ParameterKey": "LambdaFnNameSegmentUpdate",
+          "ParameterValue": "$(aws_lambda_name_segment_update)"
+        },
+        {
+          "ParameterKey": "GlueJobName",
+          "ParameterValue": "IngressLandingShellJob$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "IngressBucketName",
+          "ParameterValue": "$(aws_ingress_bucket_name)"
+        },
+        {
+          "ParameterKey": "LandingBucketName",
+          "ParameterValue": "$(aws_landing_bucket_name)"
+        },
+        {
+          "ParameterKey": "GlueScriptBucketName",
+          "ParameterValue": "$(aws_glue_script_bucket_name)"
+        },
+        {
+          "ParameterKey": "DBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "FirstRun",
+          "ParameterValue": "$(new_ingress_to_landing_stack)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+      ]
+    outputVariable: 'OUT-VAR-$(aws_ingress_stack_name)$(names_uniquifier)'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+#
+
+#
+# Upload python code to S3 for Glue Jobs
+# "s3://",{"Fn::Join": ["-", [{"Ref": "GlueScriptBucketName"}, {"Ref": "Environment"}]]},"/IngressLandingShellJob.py"
+- task: S3Upload@1
+  displayName: S3Upload hcg-glue-script
+  condition: succeededOrFailed()
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    # The CF JSON used in previous task adds  "-$(aws_environment)" to the aws_glue_script_bucket_name
+    bucketName: $(aws_glue_script_bucket_name)
+    sourceFolder: 'platform/pipelines/ingress-to-landing/'
+    globExpressions: '*.py'
+    logRequest: true
+    logResponse: true
+#
+
+#
+# PACKAGE & DEPLOY PYTHON APP TO LAMBDA
+#   Package the Python application & dependencies for deployment to Lambdas
+#     This is done in 2 steps
+#       Packaging step A
+# Package the Python application & dependencies for deployment to Lambdas
+# ArchiveFiles@2 is the same as using the zip command
+# [command]/usr/bin/zip -r -v /home/vsts/work/1/a/999.zip img
+#
+# destination of the archiveFile = /home/vsts/work/1/a/999.zip
+#
+# Zip file needs to have six.py, function.py and all the subdirectories in package in the root
+# this needs to be re-worked so the zip file is in the format that matches what devs are doing manually
+#
+# Approaching this as two separate archive tasks pointing to the same zip
+# Archive dependencies ('platform/pipelines/ingress-to-landing/function/package')
+#       Packaging step A
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for LambdaIngressLanding - Packaging step A
+  condition: succeededOrFailed()
+  inputs:
+    rootFolderOrFile: 'platform/pipelines/ingress-to-landing/function/package'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/ingress-to-landing.zip'
+    replaceExistingArchive: true
+    verbose: true
+
+#       Packaging step B
+# Archive function.py into same zip file.
+# this is tested, second task successfully adds python.py to the existing zip
+- task: ArchiveFiles@2
+  displayName: LambdaIngressLanding - Packaging step B
+  condition: succeededOrFailed()
+  inputs:
+    rootFolderOrFile: 'platform/pipelines/ingress-to-landing/function/function.py'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/ingress-to-landing.zip'
+    replaceExistingArchive: false
+    verbose: true
+
+#       Deploy the packaged application to the Lambda
+- task: LambdaDeployFunction@1
+  displayName: LambdaDeployFunction to LambdaIngressLanding
+  condition: succeededOrFailed()
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    deploymentMode: 'codeonly'
+    functionName: '$(aws_lambda_fn_name_ingress_landing)'
+    codeLocation: 'localfile'
+    localZipFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/ingress-to-landing.zip'
+    outputVariable: 'functionName'
+    logRequest: true
+    logResponse: true
+#
+
+#
+# Archive dependencies ('platform/pipelines/post-gluejob-exec/package')
+#       Packaging step A
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for HCGPipelineSegmentUpdate - Packaging step A
+  condition: succeededOrFailed()
+  inputs:
+    rootFolderOrFile: 'platform/pipelines/post-gluejob-exec/package'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/postglue_SegmentUpdate.zip'
+    replaceExistingArchive: true
+    verbose: true
+
+#       Packaging step B
+# Archive function.py into same zip file.
+# this is tested, second task successfully adds python.py to the existing zip
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for HCGPipelineSegmentUpdate - Packaging step B
+  condition: succeededOrFailed()
+  inputs:
+    rootFolderOrFile: 'platform/pipelines/post-gluejob-exec/function.py'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/postglue_SegmentUpdate.zip'
+    replaceExistingArchive: false
+    verbose: true
+
+#       Deploy the packaged application to the Lambda
+- task: LambdaDeployFunction@1
+  displayName: LambdaDeployFunction to HCGPipelineSegmentUpdate
+  condition: succeededOrFailed()
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    deploymentMode: 'codeonly'
+    functionName: '$(aws_lambda_name_segment_update)'
+    codeLocation: 'localfile'
+    localZipFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/postglue_SegmentUpdate.zip'
+    outputVariable: 'functionName'
+    logRequest: true
+    logResponse: true
+#
+
+- script: |
+    echo $(aws_ingress_stack_name)$(names_uniquifier)
+  displayName: End Deployment of Ingress To Landing Stack
+
+# ===============================================================================================================
+# ===============================================================================================================
+# ===============================================================================================================
+
+- script: |
+    echo Deploying $(aws_landing_stack_name)$(names_uniquifier)
+    echo from branch path $(Build.SourceBranch)
+    echo branch named $(Build.SourceBranchName) version $(Build.SourceVersion)
+  displayName: Begin Deployment of Landing To Staging Stack
+
+#
+# Create/Update landing-to-staging stack
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: CloudFormationCreateOrUpdateStack Landing To Staging Stack
+  condition: succeededOrFailed()
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_landing_stack_name)$(names_uniquifier)
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_landing_template_file)
+    templateParametersSource: 'inline'
+    # re: LambdaFnNameIngressLanding & LambdaFnNameSegmentUpdate
+    # Lambda FunctionName Length Limit is 64 Characters
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+    #
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "LambdaFnNameLandingStaging",
+          "ParameterValue": "$(aws_lambda_fn_name_landing_staging)"
+        },
+        {
+          "ParameterKey": "GlueJobName",
+          "ParameterValue": "LandingStagingSparkJob$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "StagingBucketName",
+          "ParameterValue": "$(aws_staging_bucket_name)"
+        },
+        {
+          "ParameterKey": "LandingBucketName",
+          "ParameterValue": "$(aws_landing_bucket_name)"
+        },
+        {
+          "ParameterKey": "GlueScriptBucketName",
+          "ParameterValue": "$(aws_glue_script_bucket_name)"
+        },
+        {
+          "ParameterKey": "INGStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "DBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+      ]
+    outputVariable: 'OUT-VAR-$(aws_landing_stack_name)$(names_uniquifier)'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+#
+
+#
+# Upload python code to S3 for Glue Jobs
+# "s3://",{"Fn::Join": ["-", [{"Ref": "GlueScriptBucketName"}, {"Ref": "Environment"}]]},"/IngressLandingShellJob.py"
+- task: S3Upload@1
+  displayName: S3Upload hcg-glue-script
+  condition: succeeded()
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    # The CF JSON used in previous task adds  "-$(aws_environment)" to the aws_glue_script_bucket_name
+    bucketName: $(aws_glue_script_bucket_name)
+    sourceFolder: 'platform/pipelines/landing-to-staging/'
+    #$(Build.ArtifactStagingDirectory)/
+    globExpressions: '*.py'
+    logRequest: true
+    logResponse: true
+#
+
+#
+# Archive dependencies ('platform/pipelines/post-gluejob-exec/package')
+#       Packaging step A
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for LambdaLandingStaging - Packaging step A
+  condition: succeededOrFailed()
+  inputs:
+    rootFolderOrFile: 'platform/pipelines/landing-to-staging/function/package'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/landing-to-staging.zip'
+    replaceExistingArchive: true
+    verbose: true
+
+#       Packaging step B
+# Archive function.py into same zip file.
+# this is tested, second task successfully adds python.py to the existing zip
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for LambdaLandingStaging - Packaging step B
+  condition: succeededOrFailed()
+  inputs:
+    rootFolderOrFile: 'platform/pipelines/landing-to-staging/function/function.py'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/landing-to-staging.zip'
+    replaceExistingArchive: false
+    verbose: true
+
+#       Deploy the packaged application to the Lambda
+- task: LambdaDeployFunction@1
+  displayName: LambdaDeployFunction to LambdaLandingStaging
+  condition: succeededOrFailed()
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    deploymentMode: 'codeonly'
+    functionName: '$(aws_lambda_fn_name_landing_staging)'
+    codeLocation: 'localfile'
+    localZipFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/landing-to-staging.zip'
+    outputVariable: 'functionName'
+    logRequest: true
+    logResponse: true
+#
+
+- script: |
+    echo $(aws_landing_stack_name)$(names_uniquifier)
+  displayName: End Deployment of Landing To Staging Stack
+
+# ===============================================================================================================
+# ===============================================================================================================
+# ===============================================================================================================
+
+- script: |
+    echo Deploying $(aws_cleansing_stack_name)$(names_uniquifier)
+    echo from branch path $(Build.SourceBranch)
+    echo branch named $(Build.SourceBranchName) version $(Build.SourceVersion)
+  displayName: Begin Deployment of Staging to Cleansing
+# Create/Update staging-to-cleansing stack
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: Staging to Cleansing
+  condition: succeededOrFailed()
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_staging_cleansing_stack_name)$(names_uniquifier)
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_staging_cleansing_template_file)
+    templateParametersSource: 'inline'
+    # re: LambdaFnNameIngressLanding & LambdaFnNameSegmentUpdate
+    # Lambda FunctionName Length Limit is 64 Characters
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+    #
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "LambdaFnNameStagingCleansing",
+          "ParameterValue": "$(aws_lambda_fn_name_staging_cleansing)"
+        },
+        {
+          "ParameterKey": "LambdaFnNameStagingQuality",
+          "ParameterValue": "$(aws_lambda_fn_name_staging_quality)"
+        },
+        {
+          "ParameterKey": "StagingCleansingCleansedGlueJobName",
+          "ParameterValue": "StagingCleansingCleansedSparkJob$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "StagingCleansingQualityGlueJobName",
+          "ParameterValue": "StagingCleansingQualitySparkJob$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GlueScriptBucketName",
+          "ParameterValue": $(aws_glue_script_bucket_name)
+        },
+        {
+          "ParameterKey": "SparkJobBookmarkOption",
+          "ParameterValue": "$(spark_job_bookmark_option)"
+        },
+        {
+          "ParameterKey": "SparkJobPythonVersion",
+          "ParameterValue": "3"
+        },
+        {
+          "ParameterKey": "SparkJobGlueVersion",
+          "ParameterValue": "1.0"
+        },
+        {
+          "ParameterKey": "SparkJobMaxCapacity",
+          "ParameterValue": "10"
+        },
+        {
+          "ParameterKey": "DBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "StackAdhocId",
+          "ParameterValue": "$(the_real_ad_hoc_id)"
+        },
+        {
+          "ParameterKey": "LNDStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "INGStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "StagingBucketName",
+          "ParameterValue": "$(aws_staging_bucket_name)"
+        },
+        {
+          "ParameterKey": "CleansingBucketName",
+          "ParameterValue": "$(aws_cleansing_bucket_name)"
+        }
+      ]
+# Upload Glue scripts
+- task: S3Upload@1
+  displayName: S3Upload hcg-glue-script
+  condition: succeeded()
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    bucketName: $(aws_glue_script_bucket_name)
+    sourceFolder: 'platform/pipelines/staging-to-cleansing/'
+    globExpressions: '*.py'
+    logRequest: true
+    logResponse: true
+
+# Zip/Upload Lambda code
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for LambdaStagingCleansing - Packaging step A
+  condition: succeededOrFailed()
+  inputs:
+    rootFolderOrFile: 'platform/pipelines/staging-to-cleansing/function/package'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/staging-to-cleansing.zip'
+    replaceExistingArchive: true
+    verbose: true
+
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for LambdaStagingCleansing - Packaging step B
+  condition: succeededOrFailed()
+  inputs:
+    rootFolderOrFile: 'platform/pipelines/staging-to-cleansing/function/function.py'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/staging-to-cleansing.zip'
+    replaceExistingArchive: false
+    verbose: true
+
+# Deploy the packaged application to the Lambda
+- task: LambdaDeployFunction@1
+  displayName: LambdaDeployFunction to LambdaStagingCleansing
+  condition: succeededOrFailed()
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    deploymentMode: 'codeonly'
+    functionName: '$(aws_lambda_fn_name_staging_cleansing)'
+    codeLocation: 'localfile'
+    localZipFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/staging-to-cleansing.zip'
+    outputVariable: 'functionName'
+    logRequest: true
+    logResponse: true
+
+# Zip/Upload Lambda code
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for LambdaStagingQuality - Packaging step A
+  condition: succeededOrFailed()
+  inputs:
+    rootFolderOrFile: 'platform/pipelines/staging-to-cleansing/quality_function/package'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/staging-to-cleansing.zip'
+    replaceExistingArchive: true
+    verbose: true
+
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for LambdaStagingQuality - Packaging step B
+  condition: succeededOrFailed()
+  inputs:
+    rootFolderOrFile: 'platform/pipelines/staging-to-cleansing/quality_function/function.py'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/staging-to-cleansing.zip'
+    replaceExistingArchive: true
+    verbose: true
+
+- task: LambdaDeployFunction@1
+  displayName: LambdaDeployFunction to LambdaStagingCleansing
+  condition: succeededOrFailed()
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    deploymentMode: 'codeonly'
+    functionName: '$(aws_lambda_fn_name_staging_quality)'
+    codeLocation: 'localfile'
+    localZipFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/staging-to-cleansing.zip'
+    outputVariable: 'functionName'
+    logRequest: true
+    logResponse: true
+
+# Create/Update cleansing-to-ods stack
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: Cleansing to ODS
+  condition: succeededOrFailed()
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_cleansing_stack_name)$(names_uniquifier)
+    templateSource: 'file'
+    templateFile: $(aws_cleansing_template_file)
+    templateParametersSource: 'inline'
+    # re: LambdaFnNameIngressLanding & LambdaFnNameSegmentUpdate
+    # Lambda FunctionName Length Limit is 64 Characters
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+    #
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "LambdaFnNameCleansingODS",
+          "ParameterValue": "$(aws_lambda_fn_name_cleansing_ods)"
+        },
+        {
+          "ParameterKey": "LambdaFnNameAnalyzeDb",
+          "ParameterValue": "$(aws_lambda_fn_name_analyze_db)"
+        },
+        {
+          "ParameterKey": "GlueJobName",
+          "ParameterValue": "CleansingODSGlueJob$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GlueScriptBucketName",
+          "ParameterValue": $(aws_glue_script_bucket_name)
+        },
+        {
+          "ParameterKey": "SparkJobBookmarkOption",
+          "ParameterValue": "$(spark_job_bookmark_option)"
+        },
+        {
+          "ParameterKey": "SparkJobPythonVersion",
+          "ParameterValue": "3"
+        },
+        {
+          "ParameterKey": "SparkJobGlueVersion",
+          "ParameterValue": "1.0"
+        },
+        {
+          "ParameterKey": "SparkJobMaxCapacity",
+          "ParameterValue": "10"
+        },
+        {
+          "ParameterKey": "DBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "StackAdhocId",
+          "ParameterValue": "$(the_real_ad_hoc_id)"
+        },
+        {
+          "ParameterKey": "LNDStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "INGStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "SCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+      ]
+    outputVariable: 'OUT-VAR-$(aws_cleansing_stack_name)$(names_uniquifier)'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+#
+
+#
+# Upload python code to S3 for Glue Jobs
+# "s3://",{"Fn::Join": ["-", [{"Ref": "GlueScriptBucketName"}, {"Ref": "Environment"}]]},"/IngressLandingShellJob.py"
+- task: S3Upload@1
+  displayName: S3Upload hcg-glue-script
+  condition: succeeded()
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    bucketName: $(aws_glue_script_bucket_name)
+    sourceFolder: 'platform/pipelines/cleansing-to-ods/'
+    globExpressions: '*.py'
+    logRequest: true
+    logResponse: true
+#
+
+#
+# Archive dependencies ('platform/pipelines/post-gluejob-exec/package')
+#       Packaging step A
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for LambdaCleansingODS - Packaging step A
+  condition: succeededOrFailed()
+  inputs:
+    rootFolderOrFile: 'platform/pipelines/cleansing-to-ods/function/package'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/cleansing-to-ods.zip'
+    replaceExistingArchive: true
+    verbose: true
+
+#       Packaging step B
+# Archive function.py into same zip file.
+# this is tested, second task successfully adds python.py to the existing zip
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for LambdaCleansingODS - Packaging step B
+  condition: succeededOrFailed()
+  inputs:
+    rootFolderOrFile: 'platform/pipelines/cleansing-to-ods/function/function.py'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/cleansing-to-ods.zip'
+    replaceExistingArchive: false
+    verbose: true
+
+#       Deploy the packaged application to the Lambda
+- task: LambdaDeployFunction@1
+  displayName: LambdaDeployFunction LambdaCleansingODS
+  condition: succeededOrFailed()
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    deploymentMode: 'codeonly'
+    functionName: '$(aws_lambda_fn_name_cleansing_ods)'
+    codeLocation: 'localfile'
+    localZipFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/cleansing-to-ods.zip'
+    outputVariable: 'functionName'
+    logRequest: true
+    logResponse: true
+
+
+# Analyze Db - Packaging step A
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for LambdaAnalyzeDb - Packaging step A
+  condition: succeededOrFailed()
+  inputs:
+    rootFolderOrFile: 'platform/pipelines/analyze-db/function/package'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/analyze-db.zip'
+    replaceExistingArchive: true
+    verbose: true
+
+# Analyze Db - Packaging step B
+# Archive function.py into same zip file.
+# this is tested, second task successfully adds python.py to the existing zip
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for LambdaAnalyzeDb - Packaging step B
+  condition: succeededOrFailed()
+  inputs:
+    rootFolderOrFile: 'platform/pipelines/analyze-db/function/function.py'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/analyze-db.zip'
+    replaceExistingArchive: false
+    verbose: true
+
+# Analyze Db - Deploy the packaged application to the Lambda
+- task: LambdaDeployFunction@1
+  displayName: LambdaDeployFunction LambdaAnalyzeDb
+  condition: succeededOrFailed()
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    deploymentMode: 'codeonly'
+    functionName: '$(aws_lambda_fn_name_analyze_db)-$(aws_environment)-lambda-analyze-function'
+    codeLocation: 'localfile'
+    localZipFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/analyze-db.zip'
+    outputVariable: 'functionName'
+    logRequest: true
+    logResponse: true
+#
+- script: |
+    echo $(aws_cleansing_stack_name)$(names_uniquifier)
+  displayName: End Deployment of Cleansing To ODS Stack
+
+# ===============================================================================================================
+# ===============================================================================================================
+# ===============================================================================================================
+
+##
+## Insight Zone Creation
+
+#
+# Archive dependencies ('cicd/prefix_creation/package')
+#       Packaging step A
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for IZ Prefix Creation - Packaging step A
+  condition: and(succeededOrFailed(), or(in('create', variables.aws_db_stack_action, variables.iz_action_a, variables.iz_action_b, variables.iz_action_c, variables.iz_action_d), in('update', variables.aws_db_stack_action, variables.iz_action_a, variables.iz_action_b, variables.iz_action_c, variables.iz_action_d, variables.iz_action_e, variables.iz_action_f, variables.iz_action_g, variables.iz_action_h)))
+  inputs:
+    rootFolderOrFile: 'cicd/prefix_creation/package'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/prefix-creation.zip'
+    replaceExistingArchive: true
+    verbose: true
+
+#       Packaging step B
+# Archive function.py into same zip file.
+# this is tested, second task successfully adds python.py to the existing zip
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for IZ Prefix Creation - Packaging step B
+  condition: and(succeededOrFailed(), or(in('create', variables.aws_db_stack_action, variables.iz_action_a, variables.iz_action_b, variables.iz_action_c, variables.iz_action_d), in('update', variables.aws_db_stack_action, variables.iz_action_a, variables.iz_action_b, variables.iz_action_c, variables.iz_action_d, variables.iz_action_e, variables.iz_action_f, variables.iz_action_g, variables.iz_action_h)))
+  inputs:
+    rootFolderOrFile: 'cicd/prefix_creation/function.py'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/prefix-creation.zip'
+    replaceExistingArchive: false
+    verbose: true
+
+#
+# Upload python code to S3 for IZ Prefix Creation
+- task: S3Upload@1
+  displayName: S3Upload for IZ Prefix Creation
+  condition: and(succeededOrFailed(), or(in('create', variables.aws_db_stack_action, variables.iz_action_a, variables.iz_action_b, variables.iz_action_c, variables.iz_action_d), in('update', variables.aws_db_stack_action, variables.iz_action_a, variables.iz_action_b, variables.iz_action_c, variables.iz_action_d, variables.iz_action_e, variables.iz_action_f, variables.iz_action_g, variables.iz_action_h)))
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    #{"Ref": "AWS::StackName"}-lambdacr-{"Ref": "Environment"}
+    bucketName: '$(aws_db_stack_name)$(names_uniquifier)-lambdacr-$(aws_environment)'
+    sourceFolder: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId)/'
+    #$(Build.ArtifactStagingDirectory)/
+    globExpressions: '*.zip'
+    logRequest: true
+    logResponse: true
+#
+# START - IZ Prefix Creation ----------------------------------------------
+#
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_iz_stack_name_a)$(names_uniquifier)
+    echo tags: CreatedBy=$(Build.RequestedForEmail)
+    echo templateSource: file
+    echo templateFile: $(aws_iz_creation_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SecurityGroup $(aws_security_group)
+    echo ExistingDBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo ExistingILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo ExistingLSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_a)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: eq(variables.iz_action_a, 'create')
+
+# Create/Update for IZ Prefix Creation
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: CloudFormationCreateOrUpdateStack for IZa Prefix Creation
+  condition: eq(variables.iz_action_a, 'create')
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_iz_stack_name_a)$(names_uniquifier)
+    templateSource: 'file'
+    templateFile: $(aws_iz_creation_template_file)
+    templateParametersSource: 'inline'
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    # re: LambdaFnNameIngressLanding & LambdaFnNameSegmentUpdate
+    # Lambda FunctionName Length Limit is 64 Characters
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+    #
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "ExistingDBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingLSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingSCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_a)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+      ]
+    outputVariable: 'OUT-VAR-$(aws_iz_stack_name_a)$(names_uniquifier)'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+#
+
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_iz_stack_name_b)$(names_uniquifier)
+    echo tags: CreatedBy=$(Build.RequestedForEmail)
+    echo templateSource: file
+    echo templateFile: $(aws_iz_creation_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SecurityGroup $(aws_security_group)
+    echo ExistingDBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo ExistingILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo ExistingLSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_b)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: eq(variables.iz_action_b, 'create')
+
+
+#
+# Create/Update for IZ Prefix Creation
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: CloudFormationCreateOrUpdateStack for IZb Prefix Creation
+  condition: eq(variables.iz_action_b, 'create')
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_iz_stack_name_b)$(names_uniquifier)
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_iz_creation_template_file)
+    templateParametersSource: 'inline'
+    # re: LambdaFnNameIngressLanding & LambdaFnNameSegmentUpdate
+    # Lambda FunctionName Length Limit is 64 Characters
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+    #
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "ExistingDBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingLSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingSCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_b)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+      ]
+    outputVariable: 'OUT-VAR-$(aws_iz_stack_name_b)$(names_uniquifier)'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+#
+
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_iz_stack_name_c)$(names_uniquifier)
+    echo tags: CreatedBy=$(Build.RequestedForEmail)
+    echo templateSource: file
+    echo templateFile: $(aws_iz_creation_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SecurityGroup $(aws_security_group)
+    echo ExistingDBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo ExistingILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo ExistingLSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_c)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: eq(variables.iz_action_c, 'create')
+
+#
+# Create/Update for IZ Prefix Creation
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: CloudFormationCreateOrUpdateStack for IZc Prefix Creation
+  condition: eq(variables.iz_action_c, 'create')
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_iz_stack_name_c)$(names_uniquifier)
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_iz_creation_template_file)
+    templateParametersSource: 'inline'
+    # re: LambdaFnNameIngressLanding & LambdaFnNameSegmentUpdate
+    # Lambda FunctionName Length Limit is 64 Characters
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+    #
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "ExistingDBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingLSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingSCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_c)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+      ]
+    outputVariable: 'OUT-VAR-$(aws_iz_stack_name_c)$(names_uniquifier)'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+#
+
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_iz_stack_name_d)$(names_uniquifier)
+    echo tags: CreatedBy=$(Build.RequestedForEmail)
+    echo templateSource: file
+    echo templateFile: $(aws_iz_creation_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SecurityGroup $(aws_security_group)
+    echo ExistingDBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo ExistingILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo ExistingLSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_d)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: eq(variables.iz_action_d, 'create')
+
+#
+# Create/Update for IZ Prefix Creation
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: CloudFormationCreateOrUpdateStack for IZd Prefix Creation
+  condition: eq(variables.iz_action_d, 'create')
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_iz_stack_name_d)$(names_uniquifier)
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    templateSource: 'file'
+    templateFile: $(aws_iz_creation_template_file)
+    templateParametersSource: 'inline'
+    # re: LambdaFnNameIngressLanding & LambdaFnNameSegmentUpdate
+    # Lambda FunctionName Length Limit is 64 Characters
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+    #
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "ExistingDBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingLSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingSCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_d)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+      ]
+    outputVariable: 'OUT-VAR-$(aws_iz_stack_name_d)$(names_uniquifier)'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+#
+
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_iz_stack_name_e)$(names_uniquifier)
+    echo tags: CreatedBy=$(Build.RequestedForEmail)
+    echo templateSource: file
+    echo templateFile: $(aws_iz_creation_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SecurityGroup $(aws_security_group)
+    echo ExistingDBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo ExistingILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo ExistingLSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_e)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: eq(variables.iz_action_e, 'create')
+
+# Create/Update for IZ Prefix Creation
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: CloudFormationCreateOrUpdateStack for IZe Prefix Creation
+  condition: eq(variables.iz_action_e, 'create')
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_iz_stack_name_e)$(names_uniquifier)
+    templateSource: 'file'
+    templateFile: $(aws_iz_creation_template_file)
+    templateParametersSource: 'inline'
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    # re: LambdaFnNameIngressLanding & LambdaFnNameSegmentUpdate
+    # Lambda FunctionName Length Limit is 64 Characters
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+    #
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "ExistingDBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingLSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingSCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_e)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+      ]
+    outputVariable: 'OUT-VAR-$(aws_iz_stack_name_e)$(names_uniquifier)'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+
+
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_iz_stack_name_f)$(names_uniquifier)
+    echo tags: CreatedBy=$(Build.RequestedForEmail)
+    echo templateSource: file
+    echo templateFile: $(aws_iz_creation_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SecurityGroup $(aws_security_group)
+    echo ExistingDBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo ExistingILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo ExistingLSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_f)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: eq(variables.iz_action_f, 'create')
+
+# Create/Update for IZ Prefix Creation
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: CloudFormationCreateOrUpdateStack for IZf Prefix Creation
+  condition: eq(variables.iz_action_f, 'create')
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_iz_stack_name_f)$(names_uniquifier)
+    templateSource: 'file'
+    templateFile: $(aws_iz_creation_template_file)
+    templateParametersSource: 'inline'
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    # re: LambdaFnNameIngressLanding & LambdaFnNameSegmentUpdate
+    # Lambda FunctionName Length Limit is 64 Characters
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+    #
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "ExistingDBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingLSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingSCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_f)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+      ]
+    outputVariable: 'OUT-VAR-$(aws_iz_stack_name_f)$(names_uniquifier)'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+
+
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_iz_stack_name_g)$(names_uniquifier)
+    echo tags: CreatedBy=$(Build.RequestedForEmail)
+    echo templateSource: file
+    echo templateFile: $(aws_iz_creation_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SecurityGroup $(aws_security_group)
+    echo ExistingDBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo ExistingILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo ExistingLSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_g)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: eq(variables.iz_action_g, 'create')
+
+# Create/Update for IZ Prefix Creation
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: CloudFormationCreateOrUpdateStack for IZg Prefix Creation
+  condition: eq(variables.iz_action_g, 'create')
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_iz_stack_name_g)$(names_uniquifier)
+    templateSource: 'file'
+    templateFile: $(aws_iz_creation_template_file)
+    templateParametersSource: 'inline'
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    # re: LambdaFnNameIngressLanding & LambdaFnNameSegmentUpdate
+    # Lambda FunctionName Length Limit is 64 Characters
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+    #
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "ExistingDBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingLSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingSCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_g)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+      ]
+    outputVariable: 'OUT-VAR-$(aws_iz_stack_name_g)$(names_uniquifier)'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+
+
+# echo input & parameters
+- script: |
+    echo Summary of template inputs for next task
+    echo awsCredentials: $(aws_credentials)
+    echo regionName: $(aws_region_name)
+    echo stackName: $(aws_iz_stack_name_h)$(names_uniquifier)
+    echo tags: CreatedBy=$(Build.RequestedForEmail)
+    echo templateSource: file
+    echo templateFile: $(aws_iz_creation_template_file)
+    echo templateParametersSource: inline
+    echo *
+    echo Summary of template parameters for next task
+    echo Environment $(aws_environment)
+    echo SecurityGroup $(aws_security_group)
+    echo ExistingDBStackName $(aws_db_stack_name)$(names_uniquifier)
+    echo ExistingILStackName $(aws_ingress_stack_name)$(names_uniquifier)
+    echo ExistingLSStackName $(aws_landing_stack_name)$(names_uniquifier)
+    echo GitBranchName $(Build.SourceBranchName)
+    echo IZName $(iz_name_h)
+    date
+  displayName: '* inputs & parameters for next task'
+  condition: eq(variables.iz_action_h, 'create')
+
+# Create/Update for IZ Prefix Creation
+- task: CloudFormationCreateOrUpdateStack@1
+  displayName: CloudFormationCreateOrUpdateStack for IZh Prefix Creation
+  condition: eq(variables.iz_action_h, 'create')
+  inputs:
+    awsCredentials: $(aws_credentials)
+    regionName: $(aws_region_name)
+    stackName: $(aws_iz_stack_name_h)$(names_uniquifier)
+    templateSource: 'file'
+    templateFile: $(aws_iz_creation_template_file)
+    templateParametersSource: 'inline'
+    tags: CreatedBy=$(Build.RequestedForEmail)
+    # re: LambdaFnNameIngressLanding & LambdaFnNameSegmentUpdate
+    # Lambda FunctionName Length Limit is 64 Characters
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+    #
+    templateParameters: |
+      [
+        {
+          "ParameterKey": "Environment",
+          "ParameterValue": "$(aws_environment)"
+        },
+        {
+          "ParameterKey": "SubnetAZ",
+          "ParameterValue": "$(aws_subnet_az)"
+        },
+        {
+          "ParameterKey": "SecurityGroup",
+          "ParameterValue": "$(aws_security_group)"
+        },
+        {
+          "ParameterKey": "ExistingDBStackName",
+          "ParameterValue": "$(aws_db_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingILStackName",
+          "ParameterValue": "$(aws_ingress_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingLSStackName",
+          "ParameterValue": "$(aws_landing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "ExistingSCStackName",
+          "ParameterValue": "$(aws_staging_cleansing_stack_name)$(names_uniquifier)"
+        },
+        {
+          "ParameterKey": "GitBranchName",
+          "ParameterValue": "$(Build.SourceBranchName)"
+        },
+        {
+          "ParameterKey": "IZName",
+          "ParameterValue": "$(iz_name_h)"
+        },
+        {
+          "ParameterKey": "CreatedBy",
+          "ParameterValue": "$(Build.RequestedForEmail)"
+        }
+      ]
+    outputVariable: 'OUT-VAR-$(aws_iz_stack_name_h)$(names_uniquifier)'
+    captureStackOutputs: 'asJSON'
+    captureAsSecuredVars: false
+
+# END - IZ Prefix Creation  ----------------------------------------------
+
+# Start - IZ Zip & Upload -------------------
+#common
+- task: ArchiveFiles@2
+  displayName: ArchiveFiles ZIP Python for the config db table of job configs IZcommon
+  condition: or(in('create', variables.iz_action_a, variables.iz_action_b, variables.iz_action_c, variables.iz_action_d, variables.iz_action_e), in('update', variables.iz_action_a, variables.iz_action_b, variables.iz_action_c, variables.iz_action_d, variables.iz_action_e, variables.iz_action_f, variables.iz_action_g, variables.iz_action_h))
+  inputs:
+    rootFolderOrFile: 'packages/common'
+    includeRootFolder: false
+    archiveType: 'zip'
+    archiveFile: '$(Build.ArtifactStagingDirectory)/glue$(Build.BuildId)/common_functions.zip'
+    replaceExistingArchive: true
+    verbose: true
+
+- task: S3Upload@1
+  displayName: S3Upload - Glue Jobs for the config db table of job configs IZcommon
+  condition: and(succeededOrFailed(), or(in('create', variables.iz_action_a, variables.iz_action_b, variables.iz_action_c, variables.iz_action_d, variables.iz_action_e), in('update', variables.iz_action_a, variables.iz_action_b, variables.iz_action_c, variables.iz_action_d, variables.iz_action_e, variables.iz_action_f, variables.iz_action_g, variables.iz_action_h)))
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    bucketName: $(aws_glue_script_bucket_name)
+    sourceFolder: '$(Build.ArtifactStagingDirectory)/glue$(Build.BuildId)/'
+    globExpressions: 'common_functions.zip'
+    targetFolder: 'packages/common/'
+    logRequest: true
+    logResponse: true
+
+- task: AWSShellScript@1
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    scriptType: 'inline'
+    inlineScript: |
+      date
+      adhoc_id=''
+      if [ -z $(names_uniquifier) ]
+      then
+            echo "No adhoc id. Environment not sandbox"
+            adhoc_id='NA'
+      else
+            echo "In sandbox"
+            adhoc_id=$(names_uniquifier)
+      fi
+
+      echo Start of task to enable data sharing across insight zones
+      python3 './cicd/build_scripts/enable_iz_sharing.py' --adhoc_id ${adhoc_id} --db_stack_name $(aws_db_stack_name)$(names_uniquifier)
+      echo End of task to enable data sharing across insight zones
+      date
+  displayName: Script to enable data sharing across insight zones
+
+- task: AWSShellScript@1
+  inputs:
+    awsCredentials: '$(aws_credentials)'
+    regionName: '$(aws_region_name)'
+    scriptType: 'inline'
+    inlineScript: |
+      date
+      echo Start of task to upload Glue packages
+      python3 './cicd/build_scripts/upload_glue_packages.py' --glue_bucket $(aws_glue_script_bucket_name)
+      echo End of task to upload Glue packages
+      date
+  displayName: Script to upload glue packages per dataset
+
